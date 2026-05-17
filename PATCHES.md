@@ -126,3 +126,73 @@ The following uses of `wp_kses_post()` and `esc_html()` throughout the theme are
 - `wp_kses_post(get_the_content())` — post body content
 - `wp_kses_post($offer)`, `wp_kses_post($max)`, `wp_kses_post($min)` — numeric/safe values
 - `esc_html(...)` calls throughout — escaping UI strings; correct use
+
+---
+
+## Patch #5 — featured_ads_shortcode: advert_horizontal wp_kses_post → _adforest_mu_render_ad
+
+**File (mu-plugin):** `/wp-content/mu-plugins/adforest-adsense-fix.php`
+**Source (plugin):** `adforest-elementor/widget_shortcodes.php` line 1642
+**Applied:** 2026-05-17
+
+**What changed:**
+```php
+// BEFORE (plugin — BROKEN)
+<?php echo wp_kses_post($advert_img); ?>
+
+// AFTER (mu-plugin — FIXED)
+<?php _adforest_mu_render_ad($advert_img); ?>
+```
+
+**Why:** `advert_horizontal` is an Elementor `TEXTAREA` control which sanitizes with `wp_kses_post()` at save time, stripping `<script>` tags. `_adforest_mu_render_ad()` detects `<ins class="adsbygoogle"` + `data-ad-client` in the content. For stripped content (no `<script>` tag), it re-wraps the bare push call: `str_replace('(adsbygoogle = window.adsbygoogle || []).push({});', '<script>...(same)...</script>', $content)`. Then raw-echoes since it is verified AdSense.
+
+**Override mechanism:** mu-plugins load before regular plugins. `if (!function_exists("featured_ads_shortcode"))` guard in source plugin is bypassed by our earlier definition.
+
+**Durability:** If `adforest-elementor` plugin is updated, check line 1642 in new `widget_shortcodes.php` and update `adforest-adsense-fix.php` accordingly. The Elementor TEXTAREA sanitization issue will persist unless the widget control type is changed to `Controls_Manager::CODE`.
+
+---
+
+## Patch #6 — adforest_display_1_ads_sidebar_section: ad_img wp_kses_post → _adforest_mu_render_ad
+
+**File (mu-plugin):** `/wp-content/mu-plugins/adforest-adsense-fix.php`
+**Source (plugin):** `adforest-elementor/adforest_elementor_functions.php` line 884
+**Applied:** 2026-05-17
+
+**What changed:**
+```php
+// BEFORE (plugin — BROKEN)
+<?php echo wp_kses_post($ad_img); ?>
+
+// AFTER (mu-plugin — FIXED)
+<?php _adforest_mu_render_ad($ad_img); ?>
+```
+
+**Why:** Same root cause as Patch #5. `adforest_display_1_ads_sidebar_section()` renders the 300x250 vertical sidebar ad. Called by `featured_ads_shortcode()`.
+
+**Override mechanism:** Same as Patch #5. `if (!function_exists('adforest_display_1_ads_sidebar_section'))` guard in source plugin.
+
+---
+
+## DB fix — Redux ad type keys updated to 'adsense'
+
+**Applied:** 2026-05-17 via WP-CLI `wp eval`
+
+Redux option `adforest_theme` ad type sub-keys were defaulting to `'image'`, routing through `adforest_render_ad('image', $content)` → `wp_kses_post()` → strips `<script>`. Changed to `'adsense'` so `adforest_render_ad('adsense', $content)` does a raw echo.
+
+**Keys updated** (11 total):
+
+| Key | Old | New |
+|-----|-----|-----|
+| `search_ad_720_2_type` | (not set) image | `adsense` |
+| `search_ad_720_1_type` | (not set) image | `adsense` |
+| `search_page_grid_adverts_type` | `image` | `adsense` |
+| `search_page_list_adverts_type` | `image` | `adsense` |
+| `style_ad_720_1_type` | `image` | `adsense` |
+| `style_ad_720_2_type` | `image` | `adsense` |
+| `adforest_user_page_ad_vertical_type` | `image` | `adsense` |
+| `blog_advertisment_top_type` | `image` | `adsense` |
+| `blog_advertisment_bottom_type` | `image` | `adsense` |
+| `single_post_advertisment_top_type` | `image` | `adsense` |
+| `single_post_advertisment_bottom_type` | `image` | `adsense` |
+
+**Durability note:** If an admin opens Appearance → Theme Options and re-saves without changing these dropdowns, the values will stay as `adsense`. However, if an admin changes a type dropdown back to `image` or saves new ad code that goes through Redux's own sanitization (which may strip `<script>` on some versions), the fix may regress. After any Redux save, re-check with: `wp eval "$theme = get_option('adforest_theme'); echo $theme['style_ad_720_1_type'];"`.
