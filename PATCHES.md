@@ -196,3 +196,71 @@ Redux option `adforest_theme` ad type sub-keys were defaulting to `'image'`, rou
 | `single_post_advertisment_bottom_type` | `image` | `adsense` |
 
 **Durability note:** If an admin opens Appearance → Theme Options and re-saves without changing these dropdowns, the values will stay as `adsense`. However, if an admin changes a type dropdown back to `image` or saves new ad code that goes through Redux's own sanitization (which may strip `<script>` on some versions), the fix may regress. After any Redux save, re-check with: `wp eval "$theme = get_option('adforest_theme'); echo $theme['style_ad_720_1_type'];"`.
+
+---
+
+## Patch #7 — Twilio bridge for server-side phone-login OTP
+
+**File (child):** `adforest-child/inc/twilio-otp-bridge.php`
+**Source (parent):** `adforest/inc/authentication.php:1577` (`do_action('adforest_send_otp_code', $contact, $otp, $user_id)`)
+**Applied:** 2026-05-19
+
+**What changed:** The parent theme fires `do_action('adforest_send_otp_code', ...)` from `sb_login_check_user_func()` when an existing user tries to log in by phone, but ships zero listeners — the action fired into the void and the SMS was never sent. This patch adds `_swipalot_twilio_send_otp()` as a listener that bridges the action to `twl_send_sms()` provided by the `wp-twilio-core` plugin.
+
+**Gating:** The bridge is a no-op unless `get_option('_swipalot_twilio_enabled', false)` returns truthy. The owner will enable Twilio plugin credentials and flip the flag separately:
+
+```
+wp option update _swipalot_twilio_enabled 1
+```
+
+To disable without removing the file:
+
+```
+wp option update _swipalot_twilio_enabled 0
+```
+
+**Failure mode:** If the flag is on but `wp-twilio-core` is missing/inactive (no `twl_send_sms()` function), or if `twl_send_sms()` returns a `WP_Error`, the bridge logs to PHP `error_log` with the phone number masked (last 4 digits → `****`). The user-facing flow still sees the AJAX call succeed because the action fires after `set_transient(...)` — the failure is silent from the user's POV, identical to today's behavior. Worth revisiting after Twilio is live (consider blocking the AJAX response on send success).
+
+**Message body:** `"Your SwipAlot verification code is XXXXXX. It expires in 5 minutes. Do not share this code."` — matches the OTP TTL set at `inc/authentication.php:1551` (300 s).
+
+**Override mechanism:** No override — this is a brand-new file loaded via `functions.php → require_once __DIR__ . '/inc/twilio-otp-bridge.php'`. The hook attaches at action priority 10 with 3 args.
+
+**Durability:** Survives parent theme updates trivially because it's net-new code attached to a documented action hook. The only failure mode on update would be the parent removing or renaming `adforest_send_otp_code`, in which case the bridge becomes inert without errors.
+
+---
+
+## Patch #8 — adforest_check_social_user: provider tagging for Google/Facebook
+
+**File (child):** `adforest-child/inc/social-login-override.php`
+**Source (parent):** `adforest/inc/authentication.php:4160-4274` (v6.0.13)
+**Applied:** 2026-05-19
+
+**What changed:** The parent's `adforest_check_social_user()` AJAX handler creates a WP user on first Google/Facebook login but writes no provider-identifying user meta. As a result, social-registered users are indistinguishable from email-registered users in the DB and cannot be counted. This patch defines the function in the child theme (caught by the parent's `if (!function_exists('adforest_check_social_user'))` guard at line 4160) with two additions:
+
+1. **Capture provider id from the verification response.** Facebook Graph API request now asks for `fields=id,name,email` (the `id` is the FB user id); Google `tokeninfo` already returns `user_id`. Both stored in a `$provider_id` local variable.
+2. **Write provider meta on both branches:**
+   - **Existing-user login:** if the matched WP user doesn't already have a `google_id` / `fb_id` meta, set it from `$provider_id`. If `_swipalot_signup_method` is unset, set it to `'google'` or `'facebook'`. This effectively backfills tags onto pre-existing social users the next time they log in.
+   - **New-user creation:** unconditionally set `google_id` / `fb_id` and `_swipalot_signup_method` after `adforest_do_register()` succeeds.
+
+**Meta keys written:**
+
+| Key | Value | Notes |
+|-----|-------|-------|
+| `google_id` | Google `user_id` from tokeninfo | Only for `network=google` signups/logins. |
+| `fb_id` | Facebook user id from Graph `/me?fields=id` | Only for `network=facebook` signups/logins. |
+| `_swipalot_signup_method` | `'google'` or `'facebook'` | Underscore prefix → hidden from default user-meta admin UI. Tracks which path each user came through. |
+
+**Override mechanism:** Child theme `functions.php` loads before parent — `require_once __DIR__ . '/inc/social-login-override.php'` defines `adforest_check_social_user` first. The `add_action('wp_ajax_sb_social_login', 'adforest_check_social_user')` calls at parent `authentication.php:4157-4158` resolve the function by name at fire time, so our definition wins. Same pattern used by Patch #1.
+
+**Durability:** After any parent AdForest update, diff `adforest/inc/authentication.php` lines 4160-4274 against this child copy. The parent function shape is stable — likely changes are minor (new field validation, additional metadata writes). Re-apply the two `$provider_id` / `update_user_meta` blocks marked above. If the parent ever ADDS native provider tagging, this child override becomes redundant and can be removed.
+
+**Audit query** (after the patch is live and at least one social login has occurred):
+
+```sql
+SELECT meta_value AS method, COUNT(DISTINCT user_id) AS users
+FROM wp_usermeta
+WHERE meta_key = '_swipalot_signup_method'
+GROUP BY meta_value;
+```
+
+**Note on App Review:** As of 2026-05-19, the Facebook App (`1779296373474905`) is not approved for the `email` permission. Until App Review is complete, Facebook signups will fail at the `$info->email == $_POST['email']` check (no email returned from Graph). The provider-tagging code is correct but no Facebook signups will succeed until App Review unblocks it. Google signups should tag immediately on the next login.

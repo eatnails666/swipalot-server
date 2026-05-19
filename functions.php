@@ -35,3 +35,15 @@ function remove_iw_review_notice() {
 // Must load before parent theme inc/utilities.php so the if(!function_exists(...))
 // guards in the parent skip their broken definitions.
 require_once __DIR__ . '/inc/ads-override.php';
+
+// --- Social-login override (Patch #8) ---
+// Defines adforest_check_social_user() before the parent's authentication.php loads,
+// so its if(!function_exists(...)) guard skips the parent definition and our
+// provider-tagged version handles the AJAX action.
+require_once __DIR__ . '/inc/social-login-override.php';
+
+// --- Twilio bridge for server-side phone-login OTP (Patch #7) ---
+// Subscribes to the adforest_send_otp_code action. Gated by the
+// _swipalot_twilio_enabled option (default false) — owner flips this once
+// wp-twilio-core plugin credentials are configured.
+require_once __DIR__ . '/inc/twilio-otp-bridge.php';
